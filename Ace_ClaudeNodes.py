@@ -1,25 +1,22 @@
 """
-ComfyUI nodes for the Anthropic Files API workflow:
+ACE Claude nodes - single file, drop into ComfyUI/custom_nodes/ and restart.
 
-1. ClaudeListFiles   - GET /v1/files, outputs a text listing (id | name | size)
-2. ClaudeFileRun     - POST /v1/messages with code_execution tool +
-                       container_upload of a file_id; outputs response text
-                       AND downloads any image URLs found in the response
-                       as a ComfyUI IMAGE batch.
+ACE_Claude_List_Files - GET /v1/files, outputs "id | name | size" text
+ACE_Claude_File_Node  - POST /v1/messages with code_execution +
+                        container_upload; optional reference_image is sent
+                        as an image block with the prompt; downloads image
+                        URLs found in the response as an IMAGE batch.
 
 Zero external dependencies (urllib only; PIL/numpy/torch ship with ComfyUI).
-
-The exact beta strings / tool type change over time. Defaults below are
-editable node fields - copy the current values from Console Playground's
-Code view if Anthropic rotates them.
 """
 
+import base64
 import io
 import json
-import re
 import os
-import urllib.request
+import re
 import urllib.error
+import urllib.request
 
 API_BASE = "https://api.anthropic.com"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -39,10 +36,7 @@ IMG_URL_RE = re.compile(r"https?://[^\s\"'<>()\[\]]+?\.(?:jpg|jpeg|png|webp|gif)
 
 
 def _headers(api_key, workspace_id, betas, json_body=False):
-    h = {
-        "x-api-key": api_key,
-        "anthropic-version": ANTHROPIC_VERSION,
-    }
+    h = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION}
     if betas.strip():
         h["anthropic-beta"] = betas.strip()
     if workspace_id.strip():
@@ -56,8 +50,20 @@ def _key(api_key):
     return api_key.strip() or os.environ.get("ANTHROPIC_API_KEY", "")
 
 
+def _image_to_b64_png(image_tensor):
+    """ComfyUI IMAGE tensor (B,H,W,C float 0-1) -> base64 PNG of first frame."""
+    import numpy as np
+    from PIL import Image
+
+    arr = image_tensor[0].cpu().numpy()
+    arr = (np.clip(arr, 0.0, 1.0) * 255.0).astype(np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(arr).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 class ClaudeListFiles:
-    CATEGORY = "Claude"
+    CATEGORY = "ACE_Claude_Nodes"
     FUNCTION = "run"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("file_list",)
@@ -97,7 +103,7 @@ class ClaudeListFiles:
 
 
 class ClaudeFileRun:
-    CATEGORY = "Claude"
+    CATEGORY = "ACE_Claude_Nodes"
     FUNCTION = "run"
     RETURN_TYPES = ("STRING", "IMAGE", "STRING")
     RETURN_NAMES = ("response", "images", "image_urls")
@@ -114,6 +120,7 @@ class ClaudeFileRun:
                 "max_tokens": ("INT", {"default": 8192, "min": 1, "max": 128000}),
             },
             "optional": {
+                "reference_image": ("IMAGE",),
                 "system": ("STRING", {"default": "", "multiline": True}),
                 "betas": ("STRING", {"default": DEFAULT_BETAS}),
                 "tool_type": ("STRING", {"default": DEFAULT_TOOL_TYPE}),
@@ -121,8 +128,6 @@ class ClaudeFileRun:
                 "image_size": ("INT", {"default": 512, "min": 64, "max": 4096}),
             },
         }
-
-    # ---- images -------------------------------------------------------
 
     def _blank(self, size):
         import torch
@@ -142,7 +147,6 @@ class ClaudeFileRun:
                 img = Image.open(io.BytesIO(raw)).convert("RGB")
             except Exception:
                 continue
-            # fit inside size x size canvas, pad with black, no distortion
             img.thumbnail((size, size), Image.LANCZOS)
             canvas = Image.new("RGB", (size, size), (0, 0, 0))
             canvas.paste(img, ((size - img.width) // 2, (size - img.height) // 2))
@@ -153,11 +157,9 @@ class ClaudeFileRun:
             return self._blank(size), used
         return torch.stack(tensors, dim=0), used
 
-    # ---- main ---------------------------------------------------------
-
     def run(self, api_key, workspace_id, file_id, model, prompt, max_tokens,
-            system="", betas=DEFAULT_BETAS, tool_type=DEFAULT_TOOL_TYPE,
-            max_images=8, image_size=512):
+            reference_image=None, system="", betas=DEFAULT_BETAS,
+            tool_type=DEFAULT_TOOL_TYPE, max_images=8, image_size=512):
 
         key = _key(api_key)
         if not key:
@@ -165,17 +167,23 @@ class ClaudeFileRun:
         if not file_id.strip():
             return ("ERROR: file_id empty", self._blank(image_size), "")
 
+        content = [{"type": "container_upload", "file_id": file_id.strip()}]
+        if reference_image is not None:
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": _image_to_b64_png(reference_image),
+                },
+            })
+        content.append({"type": "text", "text": prompt})
+
         body = {
             "model": model,
             "max_tokens": max_tokens,
             "tools": [{"type": tool_type.strip(), "name": "code_execution"}],
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "container_upload", "file_id": file_id.strip()},
-                    {"type": "text", "text": prompt},
-                ],
-            }],
+            "messages": [{"role": "user", "content": content}],
         }
         if system.strip():
             body["system"] = system
@@ -200,16 +208,16 @@ class ClaudeFileRun:
             if b.get("type") == "text"
         )
 
-        urls = list(dict.fromkeys(IMG_URL_RE.findall(text)))  # dedupe, keep order
+        urls = list(dict.fromkeys(IMG_URL_RE.findall(text)))
         images, used = self._download_images(urls, max_images, image_size)
         return (text, images, "\n".join(used))
 
 
 NODE_CLASS_MAPPINGS = {
-    "ClaudeListFiles": ClaudeListFiles,
-    "ClaudeFileRun": ClaudeFileRun,
+    "ACE_Claude_List_Files": ClaudeListFiles,
+    "ACE_Claude_File_Node": ClaudeFileRun,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ClaudeListFiles": "Claude: List Files",
-    "ClaudeFileRun": "Claude: Run on File (+images)",
+    "ACE_Claude_List_Files": "ACE Claude: List Files",
+    "ACE_Claude_File_Node": "ACE Claude: Run on File (+images)",
 }
