@@ -65,8 +65,8 @@ def _image_to_b64_png(image_tensor):
 class ClaudeListFiles:
     CATEGORY = "ACE_Claude_Nodes"
     FUNCTION = "run"
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("file_list",)
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("file_list", "file_id", "filename")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -74,16 +74,17 @@ class ClaudeListFiles:
             "required": {
                 "api_key": ("STRING", {"default": ""}),
                 "workspace_id": ("STRING", {"default": ""}),
+                "index": ("INT", {"default": 0, "min": 0, "max": 999}),
             },
             "optional": {
                 "betas": ("STRING", {"default": DEFAULT_BETAS}),
             },
         }
 
-    def run(self, api_key, workspace_id, betas=DEFAULT_BETAS):
+    def run(self, api_key, workspace_id, index, betas=DEFAULT_BETAS):
         key = _key(api_key)
         if not key:
-            return ("ERROR: no API key",)
+            return ("ERROR: no API key", "", "")
         req = urllib.request.Request(
             API_BASE + "/v1/files",
             headers=_headers(key, workspace_id, betas),
@@ -92,21 +93,26 @@ class ClaudeListFiles:
             with urllib.request.urlopen(req, timeout=60) as r:
                 data = json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            return (f"ERROR: HTTP {e.code}: {e.read().decode('utf-8','replace')}",)
+            return (f"ERROR: HTTP {e.code}: {e.read().decode('utf-8','replace')}", "", "")
         except Exception as e:
-            return (f"ERROR: {e}",)
+            return (f"ERROR: {e}", "", "")
+        files = data.get("data", [])
         lines = [
-            f"{f.get('id')} | {f.get('filename')} | {f.get('size_bytes')} bytes"
-            for f in data.get("data", [])
+            f"{i}: {f.get('id')} | {f.get('filename')} | {f.get('size_bytes')} bytes"
+            for i, f in enumerate(files)
         ]
-        return ("\n".join(lines) if lines else "(no files)",)
+        listing = "\n".join(lines) if lines else "(no files)"
+        if 0 <= index < len(files):
+            sel = files[index]
+            return (listing, sel.get("id", ""), sel.get("filename", ""))
+        return (listing, "", "")
 
 
 class ClaudeFileRun:
     CATEGORY = "ACE_Claude_Nodes"
     FUNCTION = "run"
-    RETURN_TYPES = ("STRING", "IMAGE", "STRING")
-    RETURN_NAMES = ("response", "images", "image_urls")
+    RETURN_TYPES = ("STRING", "IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("response", "images", "image_urls", "raw_json")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -163,9 +169,9 @@ class ClaudeFileRun:
 
         key = _key(api_key)
         if not key:
-            return ("ERROR: no API key", self._blank(image_size), "")
+            return ("ERROR: no API key", self._blank(image_size), "", "")
         if not file_id.strip():
-            return ("ERROR: file_id empty", self._blank(image_size), "")
+            return ("ERROR: file_id empty", self._blank(image_size), "", "")
 
         content = [{"type": "container_upload", "file_id": file_id.strip()}]
         if reference_image is not None:
@@ -198,19 +204,24 @@ class ClaudeFileRun:
             with urllib.request.urlopen(req, timeout=900) as r:
                 data = json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            return (f"ERROR: HTTP {e.code}: {e.read().decode('utf-8','replace')}",
-                    self._blank(image_size), "")
+            raw = e.read().decode("utf-8", "replace")
+            return (f"ERROR: HTTP {e.code}: {raw}", self._blank(image_size), "", raw)
         except Exception as e:
-            return (f"ERROR: request failed: {e}", self._blank(image_size), "")
+            return (f"ERROR: request failed: {e}", self._blank(image_size), "", "")
 
         text = "".join(
             b.get("text", "") for b in data.get("content", [])
             if b.get("type") == "text"
         )
 
+        stop = data.get("stop_reason")
+        if stop and stop != "end_turn":
+            text += f"\n\n[stop_reason: {stop}]"
+
         urls = list(dict.fromkeys(IMG_URL_RE.findall(text)))
         images, used = self._download_images(urls, max_images, image_size)
-        return (text, images, "\n".join(used))
+        return (text, images, "\n".join(used),
+                json.dumps(data, indent=2, ensure_ascii=False))
 
 
 NODE_CLASS_MAPPINGS = {
