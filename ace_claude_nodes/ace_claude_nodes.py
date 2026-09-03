@@ -416,9 +416,12 @@ NODE_CLASS_MAPPINGS = {
     "ACE_Claude_List_Files": ClaudeListFiles,
     "ACE_Claude_Push_File": ClaudePushFile,
     "ACE_Claude_File_Node": ClaudeFileRun,
+    "ACE_Claude_Delete_File": ClaudeDeleteFile,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ACE_Claude_List_Files": "ACE Claude: List Files",
     "ACE_Claude_Push_File": "ACE Claude: Push File",
     "ACE_Claude_File_Node": "ACE Claude: Run on File (+images)",
+    "ACE_Claude_Delete_File": "ACE Claude: Delete File"
+
 }
