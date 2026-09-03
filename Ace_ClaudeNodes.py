@@ -2,6 +2,8 @@
 ACE Claude nodes - single file, drop into ComfyUI/custom_nodes/ and restart.
 
 ACE_Claude_List_Files - GET /v1/files, outputs "id | name | size" text
+ACE_Claude_Push_File  - POST /v1/files (multipart), uploads a local file,
+                        outputs the new file_id
 ACE_Claude_File_Node  - POST /v1/messages with code_execution +
                         container_upload; optional reference_image is sent
                         as an image block with the prompt; downloads image
@@ -106,6 +108,86 @@ class ClaudeListFiles:
             sel = files[index]
             return (listing, sel.get("id", ""), sel.get("filename", ""))
         return (listing, "", "")
+
+
+class ClaudePushFile:
+    CATEGORY = "ACE_Claude_Nodes"
+    FUNCTION = "run"
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("file_id", "filename", "raw_json")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        import folder_paths
+        input_dir = folder_paths.get_input_directory()
+        files = sorted(
+            f for f in os.listdir(input_dir)
+            if os.path.isfile(os.path.join(input_dir, f))
+        )
+        return {
+            "required": {
+                "api_key": ("STRING", {"default": ""}),
+                "workspace_id": ("STRING", {"default": ""}),
+                "file": (files, {"image_upload": True}),
+            },
+            "optional": {
+                "betas": ("STRING", {"default": DEFAULT_BETAS}),
+            },
+        }
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, file, **kwargs):
+        import folder_paths
+        if not folder_paths.exists_annotated_filepath(file):
+            return f"Invalid file: {file}"
+        return True
+
+    def run(self, api_key, workspace_id, file, betas=DEFAULT_BETAS):
+        import mimetypes
+        import folder_paths
+
+        key = _key(api_key)
+        if not key:
+            return ("", "", "ERROR: no API key")
+        path = folder_paths.get_annotated_filepath(file)
+        if not path or not os.path.isfile(path):
+            return ("", "", f"ERROR: file not found: {path}")
+
+        with open(path, "rb") as f:
+            payload = f.read()
+        filename = os.path.basename(path)
+        mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+        boundary = "----ACEClaudeBoundary" + os.urandom(16).hex()
+        body = b"".join([
+            f"--{boundary}\r\n".encode("utf-8"),
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode("utf-8"),
+            f"Content-Type: {mime}\r\n\r\n".encode("utf-8"),
+            payload,
+            f"\r\n--{boundary}--\r\n".encode("utf-8"),
+        ])
+
+        headers = _headers(key, workspace_id, betas)
+        headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+        req = urllib.request.Request(
+            API_BASE + "/v1/files",
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8", "replace")
+            return ("", "", f"ERROR: HTTP {e.code}: {raw}")
+        except Exception as e:
+            return ("", "", f"ERROR: {e}")
+        return (
+            data.get("id", ""),
+            data.get("filename", ""),
+            json.dumps(data, indent=2, ensure_ascii=False),
+        )
 
 
 class ClaudeFileRun:
@@ -226,9 +308,11 @@ class ClaudeFileRun:
 
 NODE_CLASS_MAPPINGS = {
     "ACE_Claude_List_Files": ClaudeListFiles,
+    "ACE_Claude_Push_File": ClaudePushFile,
     "ACE_Claude_File_Node": ClaudeFileRun,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ACE_Claude_List_Files": "ACE Claude: List Files",
+    "ACE_Claude_Push_File": "ACE Claude: Push File",
     "ACE_Claude_File_Node": "ACE Claude: Run on File (+images)",
 }
