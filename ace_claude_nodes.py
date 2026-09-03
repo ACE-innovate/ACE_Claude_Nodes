@@ -1,15 +1,23 @@
 """
-ACE Claude nodes - single file, drop into ComfyUI/custom_nodes/ and restart.
+ACE Claude nodes. Install: copy the whole ACE_Claude_Nodes/ folder into
+ComfyUI/custom_nodes/ so it looks like:
+    custom_nodes/ACE_Claude_Nodes/__init__.py
+    custom_nodes/ACE_Claude_Nodes/ace_claude_nodes.py
+    custom_nodes/ACE_Claude_Nodes/web/ace_claude_upload.js
+Restart ComfyUI and hard-refresh the browser (Ctrl+Shift+R).
 
 ACE_Claude_List_Files - GET /v1/files, outputs "id | name | size" text
-ACE_Claude_Push_File  - POST /v1/files (multipart), uploads a local file,
-                        outputs the new file_id
+ACE_Claude_Push_File  - "choose file to upload" button on the node: pick ANY
+                        file type, it is held in RAM only (never written to
+                        disk) and pushed to the Anthropic Files API when the
+                        node runs. Outputs the file_id.
 ACE_Claude_File_Node  - POST /v1/messages with code_execution +
                         container_upload; optional reference_image is sent
                         as an image block with the prompt; downloads image
                         URLs found in the response as an IMAGE batch.
 
-Zero external dependencies (urllib only; PIL/numpy/torch ship with ComfyUI).
+Zero external dependencies (urllib only; PIL/numpy/torch/aiohttp ship with
+ComfyUI).
 """
 
 import base64
@@ -35,6 +43,12 @@ MODELS = [
 ]
 
 IMG_URL_RE = re.compile(r"https?://[^\s\"'<>()\[\]]+?\.(?:jpg|jpeg|png|webp|gif)", re.I)
+
+# In-memory store for browser uploads: {filename: bytes}. RAM only, nothing
+# on disk, cleared when ComfyUI stops. Same filename re-uploaded = replaced.
+_PENDING_FILES = {}
+
+_NO_FILES_PLACEHOLDER = "(none - use the upload button)"
 
 
 def _headers(api_key, workspace_id, betas, json_body=False):
@@ -118,17 +132,12 @@ class ClaudePushFile:
 
     @classmethod
     def INPUT_TYPES(cls):
-        import folder_paths
-        input_dir = folder_paths.get_input_directory()
-        files = sorted(
-            f for f in os.listdir(input_dir)
-            if os.path.isfile(os.path.join(input_dir, f))
-        )
+        files = sorted(_PENDING_FILES) or [_NO_FILES_PLACEHOLDER]
         return {
             "required": {
                 "api_key": ("STRING", {"default": ""}),
                 "workspace_id": ("STRING", {"default": ""}),
-                "file": (files, {"image_upload": True}),
+                "file": (files,),
             },
             "optional": {
                 "betas": ("STRING", {"default": DEFAULT_BETAS}),
@@ -137,31 +146,29 @@ class ClaudePushFile:
 
     @classmethod
     def VALIDATE_INPUTS(cls, file, **kwargs):
-        import folder_paths
-        if not folder_paths.exists_annotated_filepath(file):
-            return f"Invalid file: {file}"
+        # Always accept here; run() gives a precise error. Strict combo
+        # validation would reject files uploaded after the graph was built.
         return True
 
     def run(self, api_key, workspace_id, file, betas=DEFAULT_BETAS):
         import mimetypes
-        import folder_paths
 
         key = _key(api_key)
         if not key:
             return ("", "", "ERROR: no API key")
-        path = folder_paths.get_annotated_filepath(file)
-        if not path or not os.path.isfile(path):
-            return ("", "", f"ERROR: file not found: {path}")
+        if file not in _PENDING_FILES:
+            return ("", "",
+                    f"ERROR: no uploaded file selected. Open /ace_claude/upload "
+                    f"in a browser tab, upload a file, press R in ComfyUI, then "
+                    f"pick it in the dropdown. (got: {file!r})")
 
-        with open(path, "rb") as f:
-            payload = f.read()
-        filename = os.path.basename(path)
-        mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        payload = _PENDING_FILES[file]
+        mime = mimetypes.guess_type(file)[0] or "application/octet-stream"
 
         boundary = "----ACEClaudeBoundary" + os.urandom(16).hex()
         body = b"".join([
             f"--{boundary}\r\n".encode("utf-8"),
-            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode("utf-8"),
+            f'Content-Disposition: form-data; name="file"; filename="{file}"\r\n'.encode("utf-8"),
             f"Content-Type: {mime}\r\n\r\n".encode("utf-8"),
             payload,
             f"\r\n--{boundary}--\r\n".encode("utf-8"),
@@ -305,6 +312,63 @@ class ClaudeFileRun:
         return (text, images, "\n".join(used),
                 json.dumps(data, indent=2, ensure_ascii=False))
 
+
+_UPLOAD_HTML = """<!doctype html>
+<meta charset="utf-8">
+<title>ACE Claude upload</title>
+<h3>Upload any file (held in memory, sent to Claude by the Push File node)</h3>
+<form method="post" enctype="multipart/form-data">
+  <input type="file" name="file" required>
+  <button>Upload</button>
+</form>
+<pre>{files}</pre>
+"""
+
+
+def _register_server_routes():
+    """Built-in upload page at /ace_claude/upload. Uploaded bytes are kept in
+    RAM only; nothing is written to disk. No-op outside a running ComfyUI."""
+    try:
+        from aiohttp import web
+        from server import PromptServer
+        if getattr(PromptServer.instance, "_ace_claude_routes_registered", False):
+            return
+        PromptServer.instance._ace_claude_routes_registered = True
+        routes = PromptServer.instance.routes
+    except Exception:
+        return
+
+    def _page():
+        listing = "\n".join(
+            f"{name}  ({len(data)} bytes, in memory)"
+            for name, data in sorted(_PENDING_FILES.items())
+        ) or "(no files uploaded yet)"
+        return _UPLOAD_HTML.replace("{files}", listing)
+
+    @routes.get("/ace_claude/upload")
+    async def _ace_upload_page(request):
+        return web.Response(text=_page(), content_type="text/html")
+
+    @routes.post("/ace_claude/upload")
+    async def _ace_upload_post(request):
+        post = await request.post()
+        f = post.get("file")
+        if f is None or not getattr(f, "file", None):
+            return web.Response(status=400, text="no file")
+        name = os.path.basename(f.filename or "").strip()
+        if not name:
+            return web.Response(status=400, text="bad filename")
+        _PENDING_FILES[name] = f.file.read()
+        return web.Response(
+            text=f'stored in memory: "{name}" ({len(_PENDING_FILES[name])} bytes)\n'
+                 f"In ComfyUI press R (refresh node definitions), then pick it in "
+                 f"the ACE Claude: Push File dropdown and run the node."
+        )
+
+
+_register_server_routes()
+
+WEB_DIRECTORY = "./web"
 
 NODE_CLASS_MAPPINGS = {
     "ACE_Claude_List_Files": ClaudeListFiles,
