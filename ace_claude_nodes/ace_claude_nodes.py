@@ -77,6 +77,48 @@ def _image_to_b64_png(image_tensor):
     Image.fromarray(arr).save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
+class ClaudeDeleteFile:
+    CATEGORY = "ACE_Claude_Nodes"
+    FUNCTION = "run"
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("deleted_id", "raw_json")
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "api_key": ("STRING", {"default": ""}),
+                "workspace_id": ("STRING", {"default": ""}),
+                "file_id": ("STRING", {"default": ""}),
+                "confirm_delete": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "betas": ("STRING", {"default": DEFAULT_BETAS}),
+            },
+        }
+
+    def run(self, api_key, workspace_id, file_id, confirm_delete, betas=DEFAULT_BETAS):
+        key = _key(api_key)
+        if not key:
+            return ("", "ERROR: no API key")
+        if not file_id.strip():
+            return ("", "ERROR: file_id empty")
+        if not confirm_delete:
+            return ("", "SKIPPED: set confirm_delete to true. Deletion is permanent, no undo.")
+        req = urllib.request.Request(
+            API_BASE + "/v1/files/" + file_id.strip(),
+            headers=_headers(key, workspace_id, betas),
+            method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            return ("", f"ERROR: HTTP {e.code}: {e.read().decode('utf-8','replace')}")
+        except Exception as e:
+            return ("", f"ERROR: {e}")
+        return (data.get("id", ""), json.dumps(data, indent=2, ensure_ascii=False))
 
 class ClaudeListFiles:
     CATEGORY = "ACE_Claude_Nodes"
