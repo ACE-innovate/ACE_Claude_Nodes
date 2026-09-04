@@ -266,6 +266,7 @@ class ClaudeFileRun:
                 "max_tokens": ("INT", {"default": 8192, "min": 1, "max": 128000}),
             },
             "optional": {
+                "temperature": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "reference_image": ("IMAGE",),
                 "system": ("STRING", {"default": "", "multiline": True}),
                 "betas": ("STRING", {"default": DEFAULT_BETAS}),
@@ -305,7 +306,8 @@ class ClaudeFileRun:
 
     def run(self, api_key, workspace_id, file_id, model, prompt, max_tokens,
             reference_image=None, system="", betas=DEFAULT_BETAS,
-            tool_type=DEFAULT_TOOL_TYPE, max_images=8, image_size=512):
+            tool_type=DEFAULT_TOOL_TYPE, max_images=8, image_size=512,
+            temperature=0.0):
 
         key = _key(api_key)
         if not key:
@@ -328,6 +330,7 @@ class ClaudeFileRun:
         body = {
             "model": model,
             "max_tokens": max_tokens,
+            "temperature": temperature,
             "tools": [{"type": tool_type.strip(), "name": "code_execution"}],
             "messages": [{"role": "user", "content": content}],
         }
