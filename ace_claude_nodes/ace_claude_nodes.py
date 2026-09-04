@@ -86,6 +86,7 @@ def _image_to_b64_png(image_tensor):
     Image.fromarray(arr).save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
+
 class ClaudeDeleteFile:
     CATEGORY = "ACE_Claude_Nodes"
     FUNCTION = "run"
@@ -128,6 +129,7 @@ class ClaudeDeleteFile:
         except Exception as e:
             return ("", f"ERROR: {e}")
         return (data.get("id", ""), json.dumps(data, indent=2, ensure_ascii=False))
+
 
 class ClaudeListFiles:
     CATEGORY = "ACE_Claude_Nodes"
@@ -266,13 +268,13 @@ class ClaudeFileRun:
                 "max_tokens": ("INT", {"default": 8192, "min": 1, "max": 128000}),
             },
             "optional": {
-                "temperature": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "reference_image": ("IMAGE",),
                 "system": ("STRING", {"default": "", "multiline": True}),
                 "betas": ("STRING", {"default": DEFAULT_BETAS}),
                 "tool_type": ("STRING", {"default": DEFAULT_TOOL_TYPE}),
                 "max_images": ("INT", {"default": 8, "min": 0, "max": 32}),
                 "image_size": ("INT", {"default": 512, "min": 64, "max": 4096}),
+                "temperature": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05}),
             },
         }
 
@@ -434,6 +436,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ACE_Claude_List_Files": "ACE Claude: List Files",
     "ACE_Claude_Push_File": "ACE Claude: Push File",
     "ACE_Claude_File_Node": "ACE Claude: Run on File (+images)",
-    "ACE_Claude_Delete_File": "ACE Claude: Delete File"
-
+    "ACE_Claude_Delete_File": "ACE Claude: Delete File",
 }
